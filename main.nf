@@ -33,7 +33,8 @@ General:
 
 --assembly  	Build of your data (default hg19; also supported hg18, data are then lifted)
 --loci      	Loci that should be imputed. Default: As specified in conf/resources.config.
-
+--splitlnnumber Optional split of data for the phasing step. Number of samples in each split.
+ 
 Software/References: 
 --shapeit	Path to the SHAPEIT2 executable.
 --impute2_ref_dir Path to the IMPUTE2 reference.
@@ -94,9 +95,9 @@ params.do_beagle = false
 params.assembly = "hg19"
 params.loci = false
 params.dict = false
-params.subpop =""
+params.splitlnumber=100
 params.frqs=""
-
+params.subpop=""
 // *****************************
 // Sanity checks and validations
 // *****************************
@@ -104,9 +105,17 @@ if (!params.shapeit || params.shapeit == "/path/to/shapeit2/executable" ) {
 	exit 1, "Must provide a path to the shapeit executable. Edit in netflow.config or supply by using (--shapeit)."
 } 
 
+SHAPEIT=file("${params.shapeit}")
+if (!SHAPEIT.exists() ) {
+        exit 1, "Shapit executable not found at path given by --shapeit. Please check the path."}
+
+
 if (!params.impute2_reference_dir || params.impute2_reference_dir == "/path/to/impute2/reference/files") {
 	exit 1, "Must provide a path to the IMPUTE2 reference. Edit in netflow.config or supply by using (--impute2_reference_dir)."
 } 
+IMPUTEFILE=file("${params.impute2_reference_dir}/1000GP_Phase3_chr6.hap.gz")
+if(!IMPUTEFILE.exists()){
+    exit 1, "Reference file 1000GP_Phase3_chr6.hap.gz not found at PATH declared with --impute2_reference_dir. Please check the path and existence of the file."}
 
 if (!params.valid_assembly.contains(params.assembly) ) {
 		exit 1, "Requested for an unknown assembly (--assembly)"
@@ -283,6 +292,7 @@ if (params.assembly != "hg19") {
 //
 // **********
 
+
 process readData {
 
 //	publishDir "${params.outdir}/preprocess", mode: 'copy'
@@ -293,10 +303,10 @@ process readData {
 	output:
 	set file(bed_mod),file(bim_mod),file(fam_mod) into (bimbedfam_in, bimbedfam_report)
         set file(bed_qc),file(bim_qc),file(fam_qc) into (bimbedfam_qc)
-	set file(bed_phase),file(bim_phase),file(fam_phase) into (bimbedfam_phase)
-        val(base_name) into baseNameTMP
+        set file(bed_phase),file(bim_phase),file(fam_phase) into (bimbedfam_phase)
+    	val(base_name) into baseNameTMP
 	val(prefix) into basenameRunname
-
+        file("split_files*") into chunks
 	script:
 
 	prefix = bed.getBaseName()
@@ -310,19 +320,28 @@ process readData {
 	fam_qc = base_name_qc + ".fam"
 	base_name_phase = prefix + ".phase"
 	bed_phase = base_name_phase + ".bed"
-	bim_phase = base_name_phase + ".bim"
-	fam_phase = base_name_phase + ".fam"
+        bim_phase = base_name_phase + ".bim"
+        fam_phase = base_name_phase + ".fam"
 
-	
 	"""
 #		check_build.R ${params.ref_1000G} $prefix
 		duplicates.R $prefix
 		plink --bfile $prefix --exclude exclude_duplicates.txt --make-bed --out $base_name_qc
+         
 
+                
 		plink --allow-no-sex --bfile $base_name_qc  --chr 6 --from-mb 25 --to-mb 35 --make-bed --out $base_name_phase
+              
 
+                split -l ${params.splitlnumber}  -d $fam_phase "split_files"
+                
+
+
+   
            	plink --allow-no-sex --bfile $base_name_qc --make-bed --out $base_name_qc
 		plink --allow-no-sex --bfile $prefix  --chr 6 --from-mb 29 --to-mb 34 --make-bed --out $base_name
+
+               
 	"""
 
 }
@@ -473,30 +492,39 @@ process imputeHLACombine {
 	"""	
 }
 
+
+
+
 // **********
-// THis process performs SNP phasing
+// This process performs SNP phasing
 // **********
 process phaseSNPs {
 
 //	publishDir "${params.outdir}/phasedSNPs", mode: 'copy'
-
+        errorStrategy 'ignore' 
 	input:
-	set file(bed),file(bim),file(fam) from bimbedfam_phase
+	set file(bed), file(bim), file(fam) from bimbedfam_phase
 	val(checked_name) from checkedName
 	val(base_name) from baseName
-	
+	each fam_chunk from chunks
+
 	output:
-	set file(haps_gz),file(sample_gz),file(correlation) into phased
+//	set file(haps), file(sample), file(correlation) into phased
+        val(phased_name_val) into phased_name 
+        file(haps) into phased_haps
+ 	file(sample) into phased_sample
+        file(correlation) into phased_correlation
 
 	script:
 	prefix = bed.getBaseName()
-	haps_gz = checked_name + ".haps.gz"
-	sample_gz = checked_name + ".sample.gz"
-	correlation = checked_name + ".certainty.all"
-
-	"""
-		plink --bfile ${prefix} --make-bed --out ${checked_name}
-		phase_global_SNPs_parallel.sh ${checked_name} ${params.shapeit} ${params.impute2_reference_dir} ${task.cpus}
+        val_chunk = fam_chunk.toString().replaceAll(/.*\//,"")
+	haps = checked_name + "_" + val_chunk + ".haps"
+	sample = checked_name + "_" + val_chunk + ".sample"
+	correlation = checked_name + "_" + val_chunk + ".certainty.all"
+	phased_name_val = checked_name + "_" + val_chunk
+        """                  
+		plink --bfile ${prefix} --keep ${fam_chunk} --geno 0.05 --make-bed --out ${checked_name}"_"${val_chunk}
+		phase_global_SNPs_parallel.sh ${checked_name}"_"${val_chunk} ${params.shapeit} ${params.impute2_reference_dir} ${task.cpus}
 	#	rm *.log *.sample *.haps
 	"""
 }
@@ -510,19 +538,26 @@ process phaseHLA {
 //	publishDir "${params.outdir}/phasedHLA/Loci", mode: 'copy'
 
 	input:
-	set file(haps), file(sample), file(certainty) from phased
-	set file(imputed),val(locus) from imp_HLA
-        val(checked_name) from checkedName
+        each name from phased_name.collect()        
+//	set file(haps), file(sample), file(certainty) from phased
+        file(haps_tmp) from phased_haps.collect()
+        file(sample_tmp) from phased_sample.collect()
+        file(correlation_tmp) from phased_correlation.collect()
+	set file(imputed), val(locus) from imp_HLA
 
 	output:
 	file(phase_txt) into phasedHLA
 	file(phase_info)
 
 	script:
+        checked_name=name
 	phase_txt = checked_name +  "." + locus +  ".HLA.phased.txt"
 	phase_info = checked_name + "." + locus + ".HLA.info.txt"
-
+        haps=name + ".haps"
+        sample = name + ".sample"
+        certainty = name + ".certainty.all"
 	"""
+                  
 		phase.R $checked_name $imputed $haps $sample $certainty $MODEL_NAME $locus
 	"""
 }
@@ -538,18 +573,18 @@ process phaseHLACombine {
 
 	input:
 	file singles from phasedHLA.collect()
-        val(checked_name) from checkedName
 	set file(bed),file(bim),file(fam) from bimbedfam_phasecombine
  	val(basenameRunname) from basenameRunname
-
+        val(checked_name) from checkedName
 	output:
 	file(phased_result)
 	file(phased_png) into report_phasing
         file(assoc_data_hapl)
         file(assoc_af_hapl)
-
+        file(phased_comb)
 	script:
-	phased_result = checked_name + ".HLA.all.phased.txt"
+        phased_comb = checked_name + ".phased_overview.txt"
+        phased_result = checked_name + ".HLA.all.phased.txt"
         assoc_data_hapl = "imputation_" + checked_name + ".hapl.data"
         assoc_af_hapl = "imputation_" + checked_name + ".hapl.af"
 	phased_png = "phased_" + basenameRunname + ".png"
@@ -563,7 +598,7 @@ process phaseHLACombine {
 
 
 // **********
-// Write an automated report about the data and the imputation quality
+// This process writes an automated report about the data and the imputation quality
 // **********
 
 process report {
@@ -591,4 +626,3 @@ process report {
         R -e 'rmarkdown::render("report.Rmd", output_file="${output}", params = list(rootname="${rootname}", checked_name="${checked_name}",  pop="${params.subpop}", model="${MODEL_NAME}", shapeit="${params.shapeit}", modules="${LOADEDMODULES}", liftover="${liftover}", assembly="${params.assembly}", basenamerunname="${basenameRunname}"))'
     """
 }
-

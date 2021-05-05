@@ -15,20 +15,7 @@ CERTAINTY_R=`which certainty.R`
 
 ######################################
 # Get HLA types and prepare validation
-######################################
-
-plink --bfile $name --missing  --out $name
-cat  $name.lmiss |awk '$5 ==1' > $name.missing_for_all 
-
-if [[ $(wc -l $name.fam | awk '{print $1}') -ge 10 ]]
-then
-plink --bfile $name --maf 0.01 --exclude $name.missing_for_all  --make-bed --out $name
-else
-plink --bfile $name --exclude $name.missing_for_all  --make-bed --out $name
-fi
-
-
-
+###################################### 
 
 # EXCLUDE ATCG
 awk 'length($5) + length($6) ==2' $name.bim | awk '{ if($5=="A" && $6=="T" || $5=="T" && $6=="A" || $5=="G" && $6=="C" || $5=="C" && $6=="G"){}else{print}}' > $name.atcg
@@ -65,7 +52,7 @@ $SHAPEIT \
 
 
 
-if [[ $(wc -l $name.fam | awk '{print $1}') -ge 100 ]]
+if [[ $(wc -l $name.fam | awk '{print $1}') -gt 100 ]]
 then
 
 cat $name*.strand | grep Strand | awk '{print $4}' |sort| uniq> $name.exclude
@@ -76,9 +63,8 @@ $SHAPEIT \
 --input-map $REFERENCE_DIR_IMPUTE2/genetic_map_chr6"_combined_b37.txt" \
 --input-thr 0.9 \
 --missing-code 0 \
---force \
---states 400 \
---window 0.5 \
+--states 100 \
+--window 2 \
 --effective-size 18000 \
 --burn 7 \
 --prune 8 \
@@ -94,6 +80,7 @@ else
 cat $name*.strand | awk '{print $4}' |sort| uniq> $name.exclude
 plink --bfile $name --exclude  $name.exclude --make-bed --out $name
 
+
 $SHAPEIT \
 --input-ref  $REFERENCE_DIR_IMPUTE2/1000GP_Phase3_chr6.hap.gz  $REFERENCE_DIR_IMPUTE2/1000GP_Phase3_chr6.legend.gz  $REFERENCE_DIR_IMPUTE2/1000GP_Phase3.sample \
 --input-bed $name \
@@ -101,8 +88,8 @@ $SHAPEIT \
 --input-thr 0.9 \
 --missing-code 0 \
 --force \
---states 400 \
---window 0.5 \
+--states 100 \
+--window 2 \
 --effective-size 18000 \
 --burn 7 \
 --prune 8 \
@@ -112,8 +99,8 @@ $SHAPEIT \
 --thread $CPUS \
 --output-log $name.hgraph
 
-fi
 
+fi
 #######################
 # Phasing certainty
 #######################
@@ -124,6 +111,7 @@ for r in $(seq 1 100); do
     $SHAPEIT -convert \
             --input-graph $name.hgraph \
             --output-sample $name.S$r \
+   	    --output-log $name.S$r.log \
             --seed $r;
 done
 
@@ -138,11 +126,6 @@ $SHAPEIT -convert \
 --input-graph $name.hgraph  \
 --output-max $name \
 --output-log $name.convert
-
-#	compress
-gzip $name.hgraph
-gzip $name.haps
-gzip $name.sample
 
 
 
